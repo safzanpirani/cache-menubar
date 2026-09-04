@@ -70,7 +70,7 @@ elif ev == "Stop":
                 u = m.get("usage") if isinstance(m, dict) else None
                 if not (isinstance(u, dict) and ("cache_read_input_tokens" in u or "input_tokens" in u)): continue
                 if usage is None: usage = u; model = model or m.get("model") or o.get("model")
-                if agent == "codex": break
+                if agent == "codex" and model: break
                 cc = u.get("cache_creation") or {}
                 if (cc.get("ephemeral_1h_input_tokens") or 0) > 0 or (cc.get("ephemeral_5m_input_tokens") or 0) > 0 or (u.get("cache_creation_input_tokens") or 0) > 0:
                     wrote = u; break
