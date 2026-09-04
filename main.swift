@@ -193,6 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     var lastPoll = Date.distantPast
     var fired = Set<String>()
     var timer: Timer?
+    var lastRemotePoll = Date.distantPast
     let chime = Chime()
     var settingsWindow: NSWindow?
     var notificationsAllowed = false
@@ -216,9 +217,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         checkReminders(); render()
     }
 
+    /// Local dir and the chat app are cheap and polled every 10 s. Remote hosts go over ssh (multiplexed when
+    /// ControlMaster is on) and change only when a turn ends, so they are polled every 30 s. Reminder marks
+    /// tolerate up to 45 s of lateness, so nothing is missed.
     func poll() {
         lastPoll = Date()
         local = readLocal()
+        let remoteDue = Date().timeIntervalSince(lastRemotePoll) >= 30
         if Settings.chatBase != nil, !polling.contains("chat") {
             polling.insert("chat")
             readChat { list, err in
@@ -227,7 +232,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 self.checkReminders(); self.render()
             }
         } else if Settings.chatBase == nil { chat = []; hostErrors["chat app"] = nil }
-        for h in Settings.hosts where !polling.contains(h) {
+        if remoteDue { lastRemotePoll = Date() }
+        for h in Settings.hosts where remoteDue && !polling.contains(h) {
             polling.insert(h)
             readRemote(h) { list, err in
                 self.polling.remove(h)

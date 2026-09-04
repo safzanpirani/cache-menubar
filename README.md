@@ -15,8 +15,9 @@ switches on its next turn. No configuration is needed. The record lands in
 `~/.local/state/cachewatch/<agent>-<session>.json`, alongside the working directory, the model, the last prompt and the
 herdr pane id when the session runs inside herdr. SessionEnd removes it, and records older than six hours are pruned.
 
-The app reads that directory locally every ten seconds and, for each configured remote host, runs `ssh <host>` to read
-the same directory there. Your `~/.ssh/config` applies, so ControlMaster keeps it cheap.
+The app reads that directory locally every ten seconds and, every thirty seconds, runs `ssh <host>` for each
+configured remote host to read the same directory there. Your `~/.ssh/config` applies; with ControlMaster on, each poll
+is one channel on the existing connection, about 20 ms and a few kilobytes.
 
 The local chat app is a third source. Its `GET /api/sessions` list carries each session's cache state and keep-warm
 state, so chat sessions show up next to the CLI ones. Their submenu opens the session in the browser, toggles the
