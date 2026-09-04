@@ -74,7 +74,15 @@ in memory. "Test chimes" in the menu plays them in order.
 
 ```sh
 ./build.sh          # needs the Xcode Command Line Tools
-open CacheMenuBar.app
+cp -R CacheMenuBar.app /Applications/
+open /Applications/CacheMenuBar.app
+```
+
+Install it into `/Applications` before enabling the login item: macOS remembers the path it registered, and a rebuild
+in place breaks it. Launch at login is a checkbox in Settings, or from the shell:
+
+```sh
+/Applications/CacheMenuBar.app/Contents/MacOS/CacheMenuBar --register-login    # --unregister-login to undo
 ```
 
 Allow notifications when macOS asks. **Settings…** holds the chat app URL (default `http://localhost:8787`), the remote host list (default `ampere`), the chime,

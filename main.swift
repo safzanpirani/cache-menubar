@@ -414,6 +414,16 @@ extension AppDelegate {
     func windowWillClose(_ n: Notification) { NSApp.setActivationPolicy(.accessory) }
 }
 
+// `CacheMenuBar.app/Contents/MacOS/CacheMenuBar --register-login` (or --unregister-login) toggles the login item
+// without opening Settings. SMAppService always acts on the calling bundle, so this has to run from inside the app.
+if let flag = CommandLine.arguments.dropFirst().first, flag == "--register-login" || flag == "--unregister-login" {
+    do {
+        if flag == "--register-login" { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+        print("\(flag == "--register-login" ? "registered" : "unregistered"): status \(SMAppService.mainApp.status.rawValue)")
+    } catch { FileHandle.standardError.write("\(error)\n".data(using: .utf8)!); exit(1) }
+    exit(0)
+}
+
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
