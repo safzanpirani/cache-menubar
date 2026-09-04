@@ -48,20 +48,25 @@ if ev == "UserPromptSubmit":
     if p: st["last_prompt"] = p[:80]
 elif ev == "Stop":
     st["active"] = False; st["at"] = now
-    # Cache shape from the transcript's last assistant message: TTL (1h if any 1h write, else 5m) and cached prefix size.
+    # Cache shape from the transcript. Claude Code writes 5m cache entries when authenticated with an API key and 1h
+    # entries on a subscription, so the TTL of the last turn that wrote to the cache tells us both the TTL and the auth
+    # mode. Tokens come from the very last usage block (a pure read still tells the prefix size).
     tp = hook.get("transcript_path")
-    usage = None; model = None
+    usage = None; wrote = None; model = None
     if tp and os.path.isfile(tp):
         try:
             with open(tp, "rb") as fh:
-                fh.seek(0, 2); size = fh.tell(); fh.seek(max(0, size - 256 * 1024)); tail = fh.read().decode("utf-8", "ignore")
+                fh.seek(0, 2); size = fh.tell(); fh.seek(max(0, size - 512 * 1024)); tail = fh.read().decode("utf-8", "ignore")
             for line in reversed(tail.splitlines()):
                 try: o = json.loads(line)
                 except Exception: continue
                 m = o.get("message") if isinstance(o.get("message"), dict) else o
                 u = m.get("usage") if isinstance(m, dict) else None
-                if isinstance(u, dict) and ("cache_read_input_tokens" in u or "input_tokens" in u):
-                    usage = u; model = m.get("model") or o.get("model"); break
+                if not (isinstance(u, dict) and ("cache_read_input_tokens" in u or "input_tokens" in u)): continue
+                if usage is None: usage = u; model = m.get("model") or o.get("model")
+                cc = u.get("cache_creation") or {}
+                if (cc.get("ephemeral_1h_input_tokens") or 0) > 0 or (cc.get("ephemeral_5m_input_tokens") or 0) > 0 or (u.get("cache_creation_input_tokens") or 0) > 0:
+                    wrote = u; break
         except Exception: pass
     if agent == "codex" or (usage is None and agent != "claude"):
         st["ttl"] = "openai"
@@ -71,8 +76,11 @@ elif ev == "Stop":
         w5 = cc.get("ephemeral_5m_input_tokens", usage.get("cache_creation_input_tokens", 0)) or 0
         read = usage.get("cache_read_input_tokens", 0) or usage.get("input_tokens_details", {}).get("cached_tokens", 0) or 0
         st["tokens"] = read + w1h + w5
-        if agent == "claude": st["ttl"] = "1h" if w1h > 0 else "5m"
         if model: st["model"] = model
+    if agent == "claude" and wrote:
+        w1h = (wrote.get("cache_creation") or {}).get("ephemeral_1h_input_tokens", 0) or 0
+        st["ttl"] = "1h" if w1h > 0 else "5m"
+        st["auth"] = "subscription" if w1h > 0 else "api"
     st.setdefault("ttl", "5m" if agent == "claude" else "openai")
     st.setdefault("tokens", 0)
 else:

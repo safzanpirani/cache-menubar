@@ -45,6 +45,7 @@ struct SessionInfo {
     let at: Date?              // when the last turn ended = when the cache was written/refreshed
     let ttl: String            // "1h" | "5m" | "openai"
     let tokens: Int
+    var auth = ""              // Claude Code: "api" (5m writes) or "subscription" (1h writes)
     // chat-app sessions only
     var chatId: String? = nil
     var warmOn = false, warmPings = 0, warmNext: Date? = nil
@@ -54,7 +55,7 @@ struct SessionInfo {
     var expiresAt: Date? { at.map { $0.addingTimeInterval(ttlSeconds) } }
     func remaining(_ now: Date) -> Double { expiresAt.map { $0.timeIntervalSince(now) } ?? -1 }
     func isLive(_ now: Date) -> Bool { !active && remaining(now) > 0 }
-    var ttlLabel: String { ttl == "openai" ? "OpenAI cache" : "\(ttl) ttl" }
+    var ttlLabel: String { ttl == "openai" ? "OpenAI cache" : auth.isEmpty ? "\(ttl) ttl" : "\(ttl) ttl, \(auth)" }
     var agentLabel: String { agent == "codex" ? "Codex" : agent == "chat" ? "Chat app" : "Claude Code" }
     var where_: String { isChat ? "chat" : local ? "local" : host }
 
@@ -96,6 +97,7 @@ struct SessionInfo {
         at = (o["at"] as? Double).map { Date(timeIntervalSince1970: $0) }
         ttl = o["ttl"] as? String ?? (agent == "codex" ? "openai" : "5m")
         tokens = o["tokens"] as? Int ?? 0
+        auth = o["auth"] as? String ?? ""
     }
 }
 

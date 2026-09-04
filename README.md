@@ -7,8 +7,11 @@ while the cache is still warm and the next turn costs a cache read instead of a 
 ## How it gets its data
 
 `hooks/cachewatch-hook` is a Claude Code / Codex hook (UserPromptSubmit, Stop, SessionEnd). On every Stop it records,
-per session, when the turn ended and what the prompt cache looked like, read from the transcript's last assistant
-message: the TTL (1h if the last write was a 1h write, else 5m) and the cached prefix size. The record lands in
+per session, when the turn ended and what the prompt cache looked like, read from the transcript: the cached prefix
+size from the last usage block, and the TTL from the last turn that wrote to the cache. Claude Code writes 5-minute
+entries when it runs on an API key and 1-hour entries on a subscription, so the TTL also tells the app which auth mode
+the session is using, and it shows `5m ttl, api` or `1h ttl, subscription`. A session resumed under the other login
+switches on its next turn. No configuration is needed. The record lands in
 `~/.local/state/cachewatch/<agent>-<session>.json`, alongside the working directory, the model, the last prompt and the
 herdr pane id when the session runs inside herdr. SessionEnd removes it, and records older than six hours are pruned.
 
