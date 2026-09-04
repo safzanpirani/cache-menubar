@@ -1,0 +1,85 @@
+#!/bin/sh
+# cachewatch-hook <claude|codex>
+# Claude Code / Codex CLI hook (UserPromptSubmit, Stop, SessionEnd). Records, per session, when the last turn ended and
+# what the prompt cache looked like, into ~/.local/state/cachewatch/<agent>-<session>.json. CacheMenuBar reads that
+# directory locally and over ssh on remote hosts. Portable: POSIX sh + python3, no other dependencies.
+set -u
+agent="${1:-claude}"
+dir="${CACHEWATCH_DIR:-$HOME/.local/state/cachewatch}"
+mkdir -p "$dir" 2>/dev/null || exit 0
+command -v python3 >/dev/null 2>&1 || exit 0
+# The hook payload arrives on stdin; stash it in a file because the python script itself is fed through stdin.
+inp="$(mktemp "${TMPDIR:-/tmp}/cachewatch.XXXXXX")" || exit 0
+trap 'rm -f "$inp"' EXIT HUP INT TERM
+cat >"$inp" 2>/dev/null || true
+CW_AGENT="$agent" CW_DIR="$dir" CW_PANE="${HERDR_PANE_ID:-}" CW_INPUT="$inp" python3 - <<'PY'
+import json, os, sys, time, socket
+
+agent = os.environ["CW_AGENT"]; d = os.environ["CW_DIR"]
+try: hook = json.load(open(os.environ["CW_INPUT"]))
+except Exception: hook = {}
+sid = hook.get("session_id") or hook.get("thread_id") or ""
+ev = hook.get("hook_event_name") or hook.get("event") or ""
+if not sid or not ev: sys.exit(0)
+path = os.path.join(d, f"{agent}-{sid}.json")
+now = int(time.time())
+
+# prune stale records (6h) so the directory never grows unbounded
+try:
+    for f in os.listdir(d):
+        p = os.path.join(d, f)
+        if f.endswith(".json") and now - os.path.getmtime(p) > 6 * 3600: os.remove(p)
+except Exception: pass
+
+if ev == "SessionEnd":
+    try: os.remove(path)
+    except Exception: pass
+    sys.exit(0)
+
+try: st = json.load(open(path))
+except Exception: st = {}
+st.update({"agent": agent, "session_id": sid, "host": socket.gethostname().split(".")[0], "cwd": hook.get("cwd") or st.get("cwd") or ""})
+if os.environ.get("CW_PANE"): st["pane_id"] = os.environ["CW_PANE"]
+if not st.get("title"): st["title"] = os.path.basename(st["cwd"].rstrip("/")) or st["cwd"]
+
+if ev == "UserPromptSubmit":
+    st["active"] = True; st["prompt_at"] = now
+    p = (hook.get("prompt") or "").strip().replace("\n", " ")
+    if p: st["last_prompt"] = p[:80]
+elif ev == "Stop":
+    st["active"] = False; st["at"] = now
+    # Cache shape from the transcript's last assistant message: TTL (1h if any 1h write, else 5m) and cached prefix size.
+    tp = hook.get("transcript_path")
+    usage = None; model = None
+    if tp and os.path.isfile(tp):
+        try:
+            with open(tp, "rb") as fh:
+                fh.seek(0, 2); size = fh.tell(); fh.seek(max(0, size - 256 * 1024)); tail = fh.read().decode("utf-8", "ignore")
+            for line in reversed(tail.splitlines()):
+                try: o = json.loads(line)
+                except Exception: continue
+                m = o.get("message") if isinstance(o.get("message"), dict) else o
+                u = m.get("usage") if isinstance(m, dict) else None
+                if isinstance(u, dict) and ("cache_read_input_tokens" in u or "input_tokens" in u):
+                    usage = u; model = m.get("model") or o.get("model"); break
+        except Exception: pass
+    if agent == "codex" or (usage is None and agent != "claude"):
+        st["ttl"] = "openai"
+    if usage:
+        cc = usage.get("cache_creation") or {}
+        w1h = cc.get("ephemeral_1h_input_tokens", 0) or 0
+        w5 = cc.get("ephemeral_5m_input_tokens", usage.get("cache_creation_input_tokens", 0)) or 0
+        read = usage.get("cache_read_input_tokens", 0) or usage.get("input_tokens_details", {}).get("cached_tokens", 0) or 0
+        st["tokens"] = read + w1h + w5
+        if agent == "claude": st["ttl"] = "1h" if w1h > 0 else "5m"
+        if model: st["model"] = model
+    st.setdefault("ttl", "5m" if agent == "claude" else "openai")
+    st.setdefault("tokens", 0)
+else:
+    sys.exit(0)
+
+tmp = path + ".tmp"
+with open(tmp, "w") as fh: json.dump(st, fh)
+os.replace(tmp, path)
+PY
+exit 0
