@@ -35,14 +35,25 @@ sh hooks/install.sh
 On a remote host, from this directory:
 
 ```sh
-ssh ampere 'mkdir -p ~/tmp/cw && cat > ~/tmp/cw/cachewatch-hook' < hooks/cachewatch-hook
-ssh ampere 'cat > ~/tmp/cw/install.sh' < hooks/install.sh
-ssh ampere 'sh ~/tmp/cw/install.sh'
+fleet exec ampere 'mkdir -p ~/tmp/cw'
+fleet cp hooks/cachewatch-hook hooks/install.sh hooks/configure-codex.py ampere:~/tmp/cw/
+fleet exec ampere 'sh ~/tmp/cw/install.sh'
 ```
 
 The installer copies the hook to `~/.local/bin/cachewatch-hook` and registers it, idempotently, in
-`~/.claude/settings.json` and `~/.codex/hooks.json` next to whatever hooks are already there. It needs only `sh` and
-`python3`. Hooks take effect for new agent sessions.
+`~/.claude/settings.json` and `$CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`) next to existing hooks.
+It needs `sh`, `python3`, and Codex on PATH. The installer uses Codex's app-server API to enable the hooks feature
+and enable and trust only the three cachewatch hooks. Existing unrelated hooks and their settings are preserved.
+Registering `hooks.json` alone is insufficient when Codex has disabled a hook or has not trusted its definition.
+
+Hooks take effect for new agent sessions. Exit and resume existing Codex sessions after installation, including
+sessions inside herdr on each host. Restarting CacheMenuBar is unnecessary. A session appears on its next prompt;
+its cache countdown begins when the turn finishes. SessionEnd removes its record.
+
+Codex cache usage comes from the latest `token_count.info.last_token_usage` event in its rollout, not cumulative
+session usage. The model comes from the hook payload or rollout. OpenAI cache lifetime remains an estimate.
+
+Run the hook regression checks with `python3 -m unittest discover -s tests -v`.
 
 ## What the app shows
 

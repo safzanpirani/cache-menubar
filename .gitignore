@@ -1,3 +1,5 @@
 CacheMenuBar*.app
 CacheMenuBar.zip
 .DS_Store
+.scratch/
+__pycache__/

@@ -20,7 +20,7 @@ try: hook = json.load(open(os.environ["CW_INPUT"]))
 except Exception: hook = {}
 sid = hook.get("session_id") or hook.get("thread_id") or ""
 ev = hook.get("hook_event_name") or hook.get("event") or ""
-if not sid or not ev: sys.exit(0)
+if not isinstance(sid, str) or not sid or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for c in sid) or not ev: sys.exit(0)
 path = os.path.join(d, f"{agent}-{sid}.json")
 now = int(time.time())
 
@@ -40,6 +40,7 @@ try: st = json.load(open(path))
 except Exception: st = {}
 st.update({"agent": agent, "session_id": sid, "host": socket.gethostname().split(".")[0], "cwd": hook.get("cwd") or st.get("cwd") or ""})
 if os.environ.get("CW_PANE"): st["pane_id"] = os.environ["CW_PANE"]
+if isinstance(hook.get("model"), str) and hook["model"]: st["model"] = hook["model"]
 if not st.get("title"): st["title"] = os.path.basename(st["cwd"].rstrip("/")) or st["cwd"]
 
 if ev == "UserPromptSubmit":
@@ -55,9 +56,10 @@ elif ev == "Stop":
     if agent == "codex" and not (tp and os.path.isfile(tp)):
         # Codex rollouts: ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<thread_id>.jsonl
         import glob
-        c = sorted(glob.glob(os.path.expanduser(f"~/.codex/sessions/*/*/*/rollout-*-{sid}.jsonl")), key=os.path.getmtime)
+        codex_home = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+        c = sorted(glob.glob(os.path.join(glob.escape(codex_home), f"sessions/*/*/*/rollout-*-{sid}.jsonl")), key=os.path.getmtime)
         tp = c[-1] if c else None
-    usage = None; wrote = None; model = None
+    usage = None; wrote = None; model = hook.get("model")
     if tp and os.path.isfile(tp):
         try:
             with open(tp, "rb") as fh:
@@ -68,6 +70,8 @@ elif ev == "Stop":
                 m = o.get("message") if isinstance(o.get("message"), dict) else o.get("payload") if isinstance(o.get("payload"), dict) else o
                 if model is None and o.get("type") == "turn_context" and isinstance(m, dict) and isinstance(m.get("model"), str): model = m["model"]
                 u = m.get("usage") if isinstance(m, dict) else None
+                if agent == "codex" and m.get("type") == "token_count":
+                    u = (m.get("info") or {}).get("last_token_usage")
                 if not (isinstance(u, dict) and ("cache_read_input_tokens" in u or "input_tokens" in u)): continue
                 if usage is None: usage = u; model = model or m.get("model") or o.get("model")
                 if agent == "codex" and model: break
@@ -84,7 +88,7 @@ elif ev == "Stop":
         read = usage.get("cache_read_input_tokens", 0) or usage.get("cached_input_tokens", 0) or usage.get("input_tokens_details", {}).get("cached_tokens", 0) or 0
         w5 = w5 or usage.get("cache_write_input_tokens", 0) or 0
         st["tokens"] = read + w1h + w5
-        if model: st["model"] = model
+    if model: st["model"] = model
     if agent == "claude" and wrote:
         w1h = (wrote.get("cache_creation") or {}).get("ephemeral_1h_input_tokens", 0) or 0
         st["ttl"] = "1h" if w1h > 0 else "5m"
