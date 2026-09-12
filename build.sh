@@ -10,8 +10,8 @@ trap 'rm -rf "$BUILD_DIR"' EXIT
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-swiftc -O -target arm64-apple-macosx13.0 main.swift -o "$BUILD_DIR/CacheMenuBar-arm64"
-swiftc -O -target x86_64-apple-macosx13.0 main.swift -o "$BUILD_DIR/CacheMenuBar-x86_64"
+swiftc -O -target arm64-apple-macosx13.0 main.swift Runtime.swift -o "$BUILD_DIR/CacheMenuBar-arm64"
+swiftc -O -target x86_64-apple-macosx13.0 main.swift Runtime.swift -o "$BUILD_DIR/CacheMenuBar-x86_64"
 lipo -create "$BUILD_DIR/CacheMenuBar-arm64" "$BUILD_DIR/CacheMenuBar-x86_64" -output "$APP/Contents/MacOS/CacheMenuBar"
 
 ICONSET="$BUILD_DIR/AppIcon.iconset"

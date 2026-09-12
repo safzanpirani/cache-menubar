@@ -13,15 +13,21 @@ inp="$(mktemp "${TMPDIR:-/tmp}/cachewatch.XXXXXX")" || exit 0
 trap 'rm -f "$inp"' EXIT HUP INT TERM
 cat >"$inp" 2>/dev/null || true
 CW_AGENT="$agent" CW_DIR="$dir" CW_PANE="${HERDR_PANE_ID:-}" CW_INPUT="$inp" python3 - <<'PY'
-import json, os, sys, time, socket
+import json, os, sys, time, socket, tempfile, fcntl
 
 agent = os.environ["CW_AGENT"]; d = os.environ["CW_DIR"]
+if agent not in ("claude", "codex"): sys.exit(0)
 try: hook = json.load(open(os.environ["CW_INPUT"]))
 except Exception: hook = {}
+if not isinstance(hook, dict): sys.exit(0)
 sid = hook.get("session_id") or hook.get("thread_id") or ""
 ev = hook.get("hook_event_name") or hook.get("event") or ""
 if not isinstance(sid, str) or not sid or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for c in sid) or not ev: sys.exit(0)
 path = os.path.join(d, f"{agent}-{sid}.json")
+# Serialize the read/modify/replace lifecycle, including SessionEnd. This lock
+# file stays in place so waiters always synchronize on the same inode.
+lock_fd = os.open(os.path.join(d, ".lock"), os.O_CREAT | os.O_RDWR, 0o600)
+fcntl.flock(lock_fd, fcntl.LOCK_EX)
 now = int(time.time())
 
 # prune stale records (6h) so the directory never grows unbounded
@@ -38,6 +44,7 @@ if ev == "SessionEnd":
 
 try: st = json.load(open(path))
 except Exception: st = {}
+if not isinstance(st, dict): st = {}
 st.update({"agent": agent, "session_id": sid, "host": socket.gethostname().split(".")[0], "cwd": hook.get("cwd") or st.get("cwd") or ""})
 if os.environ.get("CW_PANE"): st["pane_id"] = os.environ["CW_PANE"]
 if isinstance(hook.get("model"), str) and hook["model"]: st["model"] = hook["model"]
@@ -45,7 +52,8 @@ if not st.get("title"): st["title"] = os.path.basename(st["cwd"].rstrip("/")) or
 
 if ev == "UserPromptSubmit":
     st["active"] = True; st["prompt_at"] = now
-    p = (hook.get("prompt") or "").strip().replace("\n", " ")
+    p = hook.get("prompt")
+    p = p.strip().replace("\n", " ") if isinstance(p, str) else ""
     if p: st["last_prompt"] = p[:80]
 elif ev == "Stop":
     st["active"] = False; st["at"] = now
@@ -67,30 +75,43 @@ elif ev == "Stop":
             for line in reversed(tail.splitlines()):
                 try: o = json.loads(line)
                 except Exception: continue
+                if not isinstance(o, dict): continue
                 m = o.get("message") if isinstance(o.get("message"), dict) else o.get("payload") if isinstance(o.get("payload"), dict) else o
                 if model is None and o.get("type") == "turn_context" and isinstance(m, dict) and isinstance(m.get("model"), str): model = m["model"]
                 u = m.get("usage") if isinstance(m, dict) else None
                 if agent == "codex" and m.get("type") == "token_count":
-                    u = (m.get("info") or {}).get("last_token_usage")
+                    info = m.get("info")
+                    u = info.get("last_token_usage") if isinstance(info, dict) else None
                 if not (isinstance(u, dict) and ("cache_read_input_tokens" in u or "input_tokens" in u)): continue
                 if usage is None: usage = u; model = model or m.get("model") or o.get("model")
                 if agent == "codex" and model: break
-                cc = u.get("cache_creation") or {}
+                cc = u.get("cache_creation")
+                cc = cc if isinstance(cc, dict) else {}
                 if (cc.get("ephemeral_1h_input_tokens") or 0) > 0 or (cc.get("ephemeral_5m_input_tokens") or 0) > 0 or (u.get("cache_creation_input_tokens") or 0) > 0:
                     wrote = u; break
         except Exception: pass
     if agent == "codex" or (usage is None and agent != "claude"):
         st["ttl"] = "openai"
+    def tokens(value):
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
     if usage:
-        cc = usage.get("cache_creation") or {}
-        w1h = cc.get("ephemeral_1h_input_tokens", 0) or 0
-        w5 = cc.get("ephemeral_5m_input_tokens", usage.get("cache_creation_input_tokens", 0)) or 0
-        read = usage.get("cache_read_input_tokens", 0) or usage.get("cached_input_tokens", 0) or usage.get("input_tokens_details", {}).get("cached_tokens", 0) or 0
-        w5 = w5 or usage.get("cache_write_input_tokens", 0) or 0
+        cc = usage.get("cache_creation")
+        cc = cc if isinstance(cc, dict) else {}
+        w1h = tokens(cc.get("ephemeral_1h_input_tokens"))
+        # The aggregate includes both TTL buckets. Do not count the one-hour
+        # writes again as five-minute writes when detailed buckets are present.
+        if any(key in cc for key in ("ephemeral_1h_input_tokens", "ephemeral_5m_input_tokens")):
+            w5 = tokens(cc.get("ephemeral_5m_input_tokens"))
+        else:
+            w5 = tokens(usage.get("cache_creation_input_tokens")) or tokens(usage.get("cache_write_input_tokens"))
+        details = usage.get("input_tokens_details")
+        details = details if isinstance(details, dict) else {}
+        read = tokens(usage.get("cache_read_input_tokens")) or tokens(usage.get("cached_input_tokens")) or tokens(details.get("cached_tokens"))
         st["tokens"] = read + w1h + w5
     if model: st["model"] = model
     if agent == "claude" and wrote:
-        w1h = (wrote.get("cache_creation") or {}).get("ephemeral_1h_input_tokens", 0) or 0
+        creation = wrote.get("cache_creation")
+        w1h = tokens(creation.get("ephemeral_1h_input_tokens")) if isinstance(creation, dict) else 0
         st["ttl"] = "1h" if w1h > 0 else "5m"
         st["auth"] = "subscription" if w1h > 0 else "api"
     st.setdefault("ttl", "5m" if agent == "claude" else "openai")
@@ -98,8 +119,15 @@ elif ev == "Stop":
 else:
     sys.exit(0)
 
-tmp = path + ".tmp"
-with open(tmp, "w") as fh: json.dump(st, fh)
-os.replace(tmp, path)
+fd, tmp = tempfile.mkstemp(prefix=".record-", dir=d)
+try:
+    with os.fdopen(fd, "w") as fh:
+        json.dump(st, fh)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+finally:
+    try: os.unlink(tmp)
+    except FileNotFoundError: pass
 PY
 exit 0

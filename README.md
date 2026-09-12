@@ -19,6 +19,11 @@ The app reads that directory locally every ten seconds and, every thirty seconds
 configured remote host to read the same directory there. Your `~/.ssh/config` applies; with ControlMaster on, each poll
 is one channel on the existing connection, about 20 ms and a few kilobytes.
 
+Remote polls drain stdout and stderr while SSH runs, with a ten-second deadline
+and an 8 MiB limit per stream. A failed source keeps its last displayed snapshot
+but does not emit cache reminders. Changing source settings invalidates pending
+responses, and Refresh includes remote hosts immediately.
+
 The local chat app is a third source. Its `GET /api/sessions` list carries each session's cache state and keep-warm
 state, so chat sessions show up next to the CLI ones. Their submenu opens the session in the browser, toggles the
 server's keep-warm pings, or fires one ping now. Sessions the server is keeping warm are not reminded about. Clear the
@@ -53,7 +58,11 @@ its cache countdown begins when the turn finishes. SessionEnd removes its record
 Codex cache usage comes from the latest `token_count.info.last_token_usage` event in its rollout, not cumulative
 session usage. The model comes from the hook payload or rollout. OpenAI cache lifetime remains an estimate.
 
-Run the hook regression checks with `python3 -m unittest discover -s tests -v`.
+Run the regression checks with `python3 -m unittest discover -s tests -v`.
+On macOS with Swift tools, this also exercises process deadlines, large pipe
+output, literal arguments, and poll ownership. Hook tests use temporary state
+and transcripts; they do not configure live agents. Hook updates use a shared
+lock and atomic private record files so concurrent events cannot collide.
 
 ## What the app shows
 

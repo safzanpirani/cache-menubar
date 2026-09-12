@@ -146,21 +146,19 @@ func readLocal() -> [SessionInfo] {
 }
 /// `ssh host` and prints each state file as one line; the user's ~/.ssh/config (ControlMaster etc.) applies.
 func readRemote(_ host: String, done: @escaping ([SessionInfo]?, String?) -> Void) {
-    let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-    p.arguments = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=6", host, "for f in ~/.local/state/cachewatch/*.json; do [ -f \"$f\" ] && cat \"$f\" && echo; done 2>/dev/null; true"]
-    let out = Pipe(), err = Pipe(); p.standardOutput = out; p.standardError = err
-    p.terminationHandler = { proc in
-        let data = out.fileHandleForReading.readDataToEndOfFile(); let e = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        DispatchQueue.main.async {
-            if proc.terminationStatus != 0 { done(nil, e.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: "\n").last ?? "ssh exit \(proc.terminationStatus)"); return }
-            let s = String(data: data, encoding: .utf8) ?? ""
-            done(s.split(separator: "\n").compactMap { line in
-                guard let d = line.data(using: .utf8), let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return nil }
-                return SessionInfo(json: o, host: host, local: false)
-            }, nil)
+    runProcess("/usr/bin/ssh", arguments: ["-o", "BatchMode=yes", "-o", "ConnectTimeout=6", "--", host,
+        "for f in ~/.local/state/cachewatch/*.json; do [ -f \"$f\" ] && cat \"$f\" && echo; done 2>/dev/null; true"]) { result in
+        if result.status != 0 {
+            let message = result.error.trimmingCharacters(in: .whitespacesAndNewlines)
+            done(nil, message.isEmpty ? "ssh exit \(result.status)" : message.components(separatedBy: "\n").last)
+            return
         }
+        let text = String(data: result.output, encoding: .utf8) ?? ""
+        done(text.split(separator: "\n").compactMap { line in
+            guard let data = line.data(using: .utf8), let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+            return SessionInfo(json: object, host: host, local: false)
+        }, nil)
     }
-    do { try p.run() } catch { done(nil, error.localizedDescription) }
 }
 
 /// Chat app sessions over HTTP.
@@ -189,7 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     var chat: [SessionInfo] = []
     var remote: [String: [SessionInfo]] = [:]
     var hostErrors: [String: String] = [:]
-    var polling = Set<String>()
+    var polling = PollRequests()
     var lastPoll = Date.distantPast
     var fired = Set<String>()
     var timer: Timer?
@@ -224,19 +222,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         lastPoll = Date()
         local = readLocal()
         let remoteDue = Date().timeIntervalSince(lastRemotePoll) >= 30
-        if Settings.chatBase != nil, !polling.contains("chat") {
-            polling.insert("chat")
+        if Settings.chatBase != nil, let request = polling.start("chat") {
             readChat { list, err in
-                self.polling.remove("chat")
+                guard self.polling.finish("chat", request) else { return }
                 if let list = list { self.chat = list; self.hostErrors["chat app"] = nil } else { self.hostErrors["chat app"] = err }
                 self.checkReminders(); self.render()
             }
         } else if Settings.chatBase == nil { chat = []; hostErrors["chat app"] = nil }
         if remoteDue { lastRemotePoll = Date() }
-        for h in Settings.hosts where remoteDue && !polling.contains(h) {
-            polling.insert(h)
+        for h in Settings.hosts where remoteDue {
+            let key = "remote:\(h)"
+            guard let request = polling.start(key) else { continue }
             readRemote(h) { list, err in
-                self.polling.remove(h)
+                guard self.polling.finish(key, request) else { return }
                 if let list = list { self.remote[h] = list; self.hostErrors[h] = nil } else { self.hostErrors[h] = err }
                 self.checkReminders(); self.render()
             }
@@ -248,19 +246,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func checkReminders() {
         let now = Date()
         for s in all where !s.active && !s.warmOn {
+            let sourceUnavailable = hostErrors[s.isChat ? "chat app" : s.host] != nil
             guard let at = s.at, let marks = offsets[s.ttl], let exp = s.expiresAt else { continue }
             let age = now.timeIntervalSince(at)
             for m in marks where m * 60 <= age && m * 60 < s.ttlSeconds {
                 let key = "\(s.key)|\(at.timeIntervalSince1970)|\(m)"
                 if fired.contains(key) { continue }; fired.insert(key)
-                if age - m * 60 > 45 { continue }
+                if sourceUnavailable || age - m * 60 > 45 { continue }
                 let left = exp.timeIntervalSince(now)
                 remind(s, title: "\(s.title) · \(mmss(left)) left", body: "\(s.agentLabel) on \(s.where_) · \(kilo(s.tokens)) cached tokens (\(s.ttlLabel)). Send a message to keep the cache.", expired: false)
             }
             let ek = "\(s.key)|\(at.timeIntervalSince1970)|expired"
             if Settings.expiredNotice, now >= exp, !fired.contains(ek) {
                 fired.insert(ek)
-                if now.timeIntervalSince(exp) > 45 { continue }
+                if sourceUnavailable || now.timeIntervalSince(exp) > 45 { continue }
                 let cost = s.resumeCost.map { " Resuming re-sends the prefix for about \(usd($0.write)) instead of \(usd($0.read))." } ?? ""
                 remind(s, title: "\(s.title) · cache expired", body: "\(s.agentLabel) on \(s.where_) · \(kilo(s.tokens)) tokens lapsed.\(cost)", expired: true)
             }
@@ -304,19 +303,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func focus(_ key: String) {
         guard let s = all.first(where: { $0.key == key }), s.local else { return }
         if let id = s.chatId { if let base = Settings.chatBase, let u = URL(string: base + "/#" + id) { NSWorkspace.shared.open(u) }; return }
-        for target in [s.paneId, s.sessionId].compactMap({ $0 }) {
-            let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/sh")
-            p.arguments = ["-lc", "herdr agent focus '\(target)' >/dev/null 2>&1"]
-            try? p.run(); p.waitUntilExit()
-            if p.terminationStatus == 0 { break }
+        let targets = [s.paneId, s.sessionId].compactMap { $0 }
+        func attempt(_ index: Int) {
+            guard index < targets.count else { return }
+            runProcess("/bin/sh", arguments: ["-lc", "exec herdr agent focus \"$1\"", "cache-menubar", targets[index]]) { result in
+                if result.status != 0 { attempt(index + 1) }
+            }
         }
+        attempt(0)
     }
     @objc func focusAction(_ m: NSMenuItem) { if let k = m.representedObject as? String { focus(k) } }
     @objc func warmAction(_ m: NSMenuItem) { if let id = m.representedObject as? String { chatPost("/api/sessions/\(id)/warm", ["on": m.state != .on]) { self.poll() } } }
     @objc func pingAction(_ m: NSMenuItem) { if let id = m.representedObject as? String { chatPost("/api/sessions/\(id)/warm", ["now": true]) { self.poll() } } }
     @objc func copyCwd(_ m: NSMenuItem) { if let s = m.representedObject as? String { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(s, forType: .string) } }
     @objc func testChime() { chime.play(expired: false); DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { self.chime.play(expired: true) } }
-    @objc func refreshAction() { poll() }
+    @objc func refreshAction() { lastRemotePoll = .distantPast; poll() }
     @objc func quit() { NSApp.terminate(nil) }
 }
 
@@ -398,9 +399,10 @@ extension AppDelegate {
         w.contentView = v; settingsWindow = w
         NSApp.setActivationPolicy(.regular); w.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
-    @objc func chatChanged(_ f: NSTextField) { Settings.chatURL = f.stringValue.trimmingCharacters(in: .whitespaces); chat = []; hostErrors["chat app"] = nil; poll() }
+    @objc func chatChanged(_ f: NSTextField) { Settings.chatURL = f.stringValue.trimmingCharacters(in: .whitespaces); polling.cancel("chat"); chat = []; hostErrors["chat app"] = nil; poll() }
     @objc func hostsChanged(_ f: NSTextField) {
         Settings.hosts = f.stringValue.split(whereSeparator: { $0 == "," || $0 == " " }).map { String($0) }.filter { !$0.isEmpty }
+        polling.cancelAll(); lastRemotePoll = .distantPast
         remote = [:]; hostErrors = [:]; poll()
     }
     @objc func openaiChanged(_ f: NSTextField) { Settings.openaiMinutes = f.integerValue; render() }
