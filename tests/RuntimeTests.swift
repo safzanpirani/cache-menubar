@@ -1,5 +1,21 @@
 import Foundation
 
+final class ChatProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        if request.url!.path == "/timeout" {
+            client?.urlProtocol(self, didFailWithError: URLError(.timedOut)); return
+        }
+        let status = Int(request.url!.lastPathComponent)!
+        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        if status != 204 { client?.urlProtocol(self, didLoad: Data("[]".utf8)) }
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
 @main struct RuntimeTests {
     static func require(_ value: Bool, _ message: String) {
         if !value { FileHandle.standardError.write(Data("FAIL: \(message)\n".utf8)); exit(1) }
@@ -53,6 +69,53 @@ import Foundation
         polls.cancelAll()
         require(!polls.finish("remote:chat", remote) && polls.start("remote:chat") != nil,
                 "changed host settings must invalidate old polls")
-        print("PASS: process output, deadlines, inherited pipes, launch errors, literal arguments, and poll ownership")
+        var reminders = ReminderHistory()
+        let at = Date(timeIntervalSince1970: 1000)
+        let keys = Set((0..<600).map { "session-\($0)" })
+        var remindersFirstPass = true
+        for _ in 0..<3 {
+            var consumed = 0
+            for key in keys {
+                for mark in ["13", "28", "43", "58", "expired"] {
+                    if reminders.consume(key, at: at, mark: mark) { consumed += 1 }
+                }
+            }
+            require(consumed == (remindersFirstPass ? 3000 : 0), "large reminder histories must not replay")
+            remindersFirstPass = false
+            reminders.retain(keys)
+        }
+        require(reminders.consume("session-0", at: at.addingTimeInterval(1), mark: "13"), "a new turn must reset its marks")
+        require(!reminders.consume("session-1", at: at, mark: "13"), "a new turn must preserve other sessions' marks")
+        reminders.retain(["session-0"])
+        require(reminders.consume("session-1", at: at, mark: "13"), "removed sessions must release their history")
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [ChatProtocol.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        func chat(_ path: String, method: String = "GET") -> Result<Data, Error> {
+            var result: Result<Data, Error>?
+            var request = URLRequest(url: URL(string: "https://fixture.invalid/" + path)!)
+            request.httpMethod = method
+            runChatRequest(request, session: session) {
+                require(Thread.isMainThread, "HTTP callbacks must run on the main thread")
+                result = $0
+            }
+            let deadline = Date().addingTimeInterval(2)
+            while result == nil && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+            require(result != nil, "HTTP completion must arrive")
+            return result!
+        }
+        if case .success(let data) = chat("200") { require(data == Data("[]".utf8), "successful response must preserve data") }
+        else { require(false, "HTTP 200 must succeed") }
+        for method in ["GET", "POST"] {
+            if case .failure(let error) = chat("503", method: method) {
+                require(error.localizedDescription.contains("503"), "HTTP failures must identify status")
+            } else { require(false, "HTTP failure must not succeed, even with valid JSON") }
+        }
+        if case .success(let data) = chat("204", method: "POST") { require(data.isEmpty, "empty successful action must be accepted") }
+        else { require(false, "HTTP 204 must succeed") }
+        if case .failure = chat("timeout") {} else { require(false, "transport failure must not succeed") }
+        print("PASS: process output, deadlines, poll ownership, reminder history, and HTTP failures")
     }
 }

@@ -75,3 +75,44 @@ struct PollRequests {
     mutating func cancel(_ key: String) { requests.removeValue(forKey: key) }
     mutating func cancelAll() { requests.removeAll() }
 }
+
+/// Keep marks for each session's current turn, without resetting other sessions.
+struct ReminderHistory {
+    private var sessions: [String: (at: Date, marks: Set<String>)] = [:]
+
+    mutating func retain(_ keys: Set<String>) {
+        sessions = sessions.filter { keys.contains($0.key) }
+    }
+
+    mutating func consume(_ key: String, at: Date, mark: String) -> Bool {
+        if sessions[key]?.at != at { sessions[key] = (at, []) }
+        return sessions[key]!.marks.insert(mark).inserted
+    }
+}
+
+struct ChatRequestError: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+}
+
+/// HTTP errors must not masquerade as a successful refresh or warm action.
+func runChatRequest(_ request: URLRequest, session: URLSession = .shared,
+                    done: @escaping (Result<Data, Error>) -> Void) {
+    var request = request
+    request.timeoutInterval = 5
+    session.dataTask(with: request) { data, response, error in
+        let result: Result<Data, Error>
+        if let error = error {
+            result = .failure(error)
+        } else if let response = response as? HTTPURLResponse {
+            if (200..<300).contains(response.statusCode) {
+                result = .success(data ?? Data())
+            } else {
+                result = .failure(ChatRequestError(message: "Chat server returned HTTP \(response.statusCode)"))
+            }
+        } else {
+            result = .failure(ChatRequestError(message: "Chat server did not return an HTTP response"))
+        }
+        DispatchQueue.main.async { done(result) }
+    }.resume()
+}

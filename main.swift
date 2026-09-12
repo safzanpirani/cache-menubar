@@ -163,21 +163,30 @@ func readRemote(_ host: String, done: @escaping ([SessionInfo]?, String?) -> Voi
 
 /// Chat app sessions over HTTP.
 func readChat(done: @escaping ([SessionInfo]?, String?) -> Void) {
-    guard let base = Settings.chatBase, let url = URL(string: base + "/api/sessions") else { done([], nil); return }
-    var req = URLRequest(url: url); req.timeoutInterval = 5
-    URLSession.shared.dataTask(with: req) { data, _, err in
-        DispatchQueue.main.async {
-            if let err = err { done(nil, err.localizedDescription); return }
-            guard let data = data, let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { done(nil, "unreadable response"); return }
+    guard let base = Settings.chatBase else { done([], nil); return }
+    guard let url = URL(string: base + "/api/sessions") else { done(nil, "Invalid chat URL"); return }
+    runChatRequest(URLRequest(url: url)) { result in
+        switch result {
+        case .failure(let error): done(nil, error.localizedDescription)
+        case .success(let data):
+            guard let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { done(nil, "unreadable response"); return }
             done(arr.compactMap { SessionInfo(chat: $0) }, nil)
         }
-    }.resume()
+    }
 }
-func chatPost(_ path: String, _ body: [String: Any], then: @escaping () -> Void) {
-    guard let base = Settings.chatBase, let u = URL(string: base + path) else { return }
+func chatPost(_ path: String, _ body: [String: Any], then: @escaping (Error?) -> Void) {
+    guard let base = Settings.chatBase, let u = URL(string: base + path) else {
+        then(ChatRequestError(message: "Invalid chat URL")); return
+    }
     var r = URLRequest(url: u); r.httpMethod = "POST"; r.setValue("application/json", forHTTPHeaderField: "content-type")
     r.httpBody = try? JSONSerialization.data(withJSONObject: body)
-    URLSession.shared.dataTask(with: r) { _, _, _ in DispatchQueue.main.async(execute: then) }.resume()
+    runChatRequest(r) { result in
+        guard Settings.chatBase == base else { return }
+        switch result {
+        case .success: then(nil)
+        case .failure(let error): then(error)
+        }
+    }
 }
 
 // ---------- app ----------
@@ -189,7 +198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     var hostErrors: [String: String] = [:]
     var polling = PollRequests()
     var lastPoll = Date.distantPast
-    var fired = Set<String>()
+    var reminders = ReminderHistory()
     var timer: Timer?
     var lastRemotePoll = Date.distantPast
     let chime = Chime()
@@ -245,26 +254,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     /// another turn) starts a fresh set. Marks that came due while the app or the host was unreachable are skipped, not backfilled.
     func checkReminders() {
         let now = Date()
+        reminders.retain(Set(all.map { $0.key }))
         for s in all where !s.active && !s.warmOn {
             let sourceUnavailable = hostErrors[s.isChat ? "chat app" : s.host] != nil
             guard let at = s.at, let marks = offsets[s.ttl], let exp = s.expiresAt else { continue }
             let age = now.timeIntervalSince(at)
             for m in marks where m * 60 <= age && m * 60 < s.ttlSeconds {
-                let key = "\(s.key)|\(at.timeIntervalSince1970)|\(m)"
-                if fired.contains(key) { continue }; fired.insert(key)
+                guard reminders.consume(s.key, at: at, mark: String(m)) else { continue }
                 if sourceUnavailable || age - m * 60 > 45 { continue }
                 let left = exp.timeIntervalSince(now)
                 remind(s, title: "\(s.title) · \(mmss(left)) left", body: "\(s.agentLabel) on \(s.where_) · \(kilo(s.tokens)) cached tokens (\(s.ttlLabel)). Send a message to keep the cache.", expired: false)
             }
-            let ek = "\(s.key)|\(at.timeIntervalSince1970)|expired"
-            if Settings.expiredNotice, now >= exp, !fired.contains(ek) {
-                fired.insert(ek)
+            if Settings.expiredNotice, now >= exp, reminders.consume(s.key, at: at, mark: "expired") {
                 if sourceUnavailable || now.timeIntervalSince(exp) > 45 { continue }
                 let cost = s.resumeCost.map { " Resuming re-sends the prefix for about \(usd($0.write)) instead of \(usd($0.read))." } ?? ""
                 remind(s, title: "\(s.title) · cache expired", body: "\(s.agentLabel) on \(s.where_) · \(kilo(s.tokens)) tokens lapsed.\(cost)", expired: true)
             }
         }
-        if fired.count > 2000 { fired.removeAll() }
     }
 
     func remind(_ s: SessionInfo, title: String, body: String, expired: Bool) {
@@ -313,8 +319,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         attempt(0)
     }
     @objc func focusAction(_ m: NSMenuItem) { if let k = m.representedObject as? String { focus(k) } }
-    @objc func warmAction(_ m: NSMenuItem) { if let id = m.representedObject as? String { chatPost("/api/sessions/\(id)/warm", ["on": m.state != .on]) { self.poll() } } }
-    @objc func pingAction(_ m: NSMenuItem) { if let id = m.representedObject as? String { chatPost("/api/sessions/\(id)/warm", ["now": true]) { self.poll() } } }
+    func changeWarm(_ id: String, body: [String: Any]) {
+        chatPost("/api/sessions/\(id)/warm", body) { error in
+            if let error = error { NSAlert(error: error).runModal(); return }
+            self.polling.cancel("chat"); self.poll()
+        }
+    }
+    @objc func warmAction(_ m: NSMenuItem) { if let id = m.representedObject as? String { changeWarm(id, body: ["on": m.state != .on]) } }
+    @objc func pingAction(_ m: NSMenuItem) { if let id = m.representedObject as? String { changeWarm(id, body: ["now": true]) } }
     @objc func copyCwd(_ m: NSMenuItem) { if let s = m.representedObject as? String { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(s, forType: .string) } }
     @objc func testChime() { chime.play(expired: false); DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { self.chime.play(expired: true) } }
     @objc func refreshAction() { lastRemotePoll = .distantPast; poll() }

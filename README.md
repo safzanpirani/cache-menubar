@@ -22,7 +22,9 @@ is one channel on the existing connection, about 20 ms and a few kilobytes.
 Remote polls drain stdout and stderr while SSH runs, with a ten-second deadline
 and an 8 MiB limit per stream. A failed source keeps its last displayed snapshot
 but does not emit cache reminders. Changing source settings invalidates pending
-responses, and Refresh includes remote hosts immediately.
+responses, and Refresh includes remote hosts immediately. Chat HTTP failures retain the
+last displayed sessions, and failed keep-warm actions show an error. Successful
+actions refresh the session list and invalidate older pending polls.
 
 The local chat app is a third source. Its `GET /api/sessions` list carries each session's cache state and keep-warm
 state, so chat sessions show up next to the CLI ones. Their submenu opens the session in the browser, toggles the
@@ -86,6 +88,8 @@ another turn:
 
 A final notice fires when the cache has expired, with the estimated cost of resuming. Sessions that are mid-turn are not
 reminded about. Marks that came due while the app or a host was unreachable are skipped, not backfilled.
+Reminder history follows each session's current turn and is discarded when that
+session disappears; long-running app sessions do not reset all reminder marks.
 
 Two chimes: a rising C5 to G5 for a reminder, a falling G5, C5, G4 for an expiry. Both are quiet sine tones synthesised
 in memory. "Test chimes" in the menu plays them in order.
