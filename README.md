@@ -4,9 +4,9 @@ A macOS menu-bar app that counts down the prompt cache of every Claude Code, Cod
 running, here and on remote hosts, and chimes before one expires. Reply while the cache is warm and the next turn is a
 cache read instead of a fresh write.
 
-```
-  ⏱ 12:47 +3
-```
+<img src="Assets/menubar.png" alt="Menu bar showing 31:11 left with one other live session" width="101">
+
+Thirty-one minutes left on the cache that expires first, and one other session still live.
 
 ## Install
 
