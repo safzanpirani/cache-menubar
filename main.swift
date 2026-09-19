@@ -56,7 +56,7 @@ struct SessionInfo {
     func remaining(_ now: Date) -> Double { expiresAt.map { $0.timeIntervalSince(now) } ?? -1 }
     func isLive(_ now: Date) -> Bool { !active && remaining(now) > 0 }
     var ttlLabel: String { ttl == "openai" ? "OpenAI cache" : auth.isEmpty ? "\(ttl) ttl" : "\(ttl) ttl, \(auth)" }
-    var agentLabel: String { agent == "codex" ? "Codex" : agent == "chat" ? "Chat app" : "Claude Code" }
+    var agentLabel: String { agent == "codex" ? "Codex" : agent == "opencode" ? "opencode" : agent == "chat" ? "Chat app" : "Claude Code" }
     var where_: String { isChat ? "chat" : local ? "local" : host }
 
     /// Cost of re-sending the prefix once it has lapsed, versus the read it would have been.
@@ -95,7 +95,7 @@ struct SessionInfo {
         lastPrompt = o["last_prompt"] as? String
         active = o["active"] as? Bool ?? false
         at = (o["at"] as? Double).map { Date(timeIntervalSince1970: $0) }
-        ttl = o["ttl"] as? String ?? (agent == "codex" ? "openai" : "5m")
+        ttl = o["ttl"] as? String ?? (agent == "claude" ? "5m" : "openai")
         tokens = o["tokens"] as? Int ?? 0
         auth = o["auth"] as? String ?? ""
     }
@@ -216,7 +216,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let center = UNUserNotificationCenter.current(); center.delegate = self
         center.requestAuthorization(options: [.alert, .sound]) { ok, _ in DispatchQueue.main.async { self.notificationsAllowed = ok } }
         poll()
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
     }
 
     func tick() {
@@ -289,6 +291,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     // ---------- menubar rendering ----------
     func render() {
         let now = Date(); let l = live(now)
+        // Update existing rows without replacing the user's highlighted item or open submenu.
+        if let menu = statusItem.menu {
+            for item in menu.items {
+                guard let key = item.representedObject as? String,
+                      let session = all.first(where: { $0.key == key }) else { continue }
+                item.title = sessionTitle(session, now: now)
+            }
+        }
         guard let b = statusItem.button else { return }
         let working = all.filter { $0.active }.count
         if let first = l.first {
@@ -353,11 +363,16 @@ extension AppDelegate: NSMenuDelegate {
         menu.addItem(withTitle: "Quit CacheMenuBar", action: #selector(quit), keyEquivalent: "q").target = self
     }
 
-    func sessionItem(_ s: SessionInfo, now: Date) -> NSMenuItem {
+    func sessionTitle(_ s: SessionInfo, now: Date) -> String {
         let left = s.remaining(now)
         let state = s.active ? "working" : left > 0 ? mmss(left) : "expired"
         let title = String(s.title.prefix(36)) + (s.title.count > 36 ? "…" : "")
-        let it = NSMenuItem(title: "\(title)  ·  \(state)  ·  \(kilo(s.tokens))  ·  \(s.where_)", action: #selector(focusAction), keyEquivalent: "")
+        return "\(title)  ·  \(state)  ·  \(kilo(s.tokens))  ·  \(s.where_)"
+    }
+
+    func sessionItem(_ s: SessionInfo, now: Date) -> NSMenuItem {
+        let left = s.remaining(now)
+        let it = NSMenuItem(title: sessionTitle(s, now: now), action: #selector(focusAction), keyEquivalent: "")
         it.target = self; it.representedObject = s.key
         it.image = NSImage(systemSymbolName: s.warmOn ? "flame.fill" : s.active ? "circle.dotted" : left > 0 ? (left < 180 ? "exclamationmark.circle" : "checkmark.circle") : "clock.badge.xmark", accessibilityDescription: nil)
         let sub = NSMenu()

@@ -1,8 +1,8 @@
 # CacheMenuBar
 
-A small native macOS menu-bar app that watches the prompt caches of your Claude Code and Codex CLI sessions, on this
-Mac and on remote hosts, and reminds you before they expire with a soft chime and a notification. Continue the session
-while the cache is still warm and the next turn costs a cache read instead of a fresh write.
+A small native macOS menu-bar app that watches the prompt caches of your Claude Code, Codex CLI and opencode
+sessions, on this Mac and on remote hosts, and reminds you before they expire with a soft chime and a notification.
+Continue the session while the cache is still warm and the next turn costs a cache read instead of a fresh write.
 
 ## How it gets its data
 
@@ -14,6 +14,12 @@ the session is using, and it shows `5m ttl, api` or `1h ttl, subscription`. A se
 switches on its next turn. No configuration is needed. The record lands in
 `~/.local/state/cachewatch/<agent>-<session>.json`, alongside the working directory, the model, the last prompt and the
 herdr pane id when the session runs inside herdr. SessionEnd removes it, and records older than six hours are pruned.
+
+`hooks/cachewatch-opencode.js` is the opencode half, installed as an opencode plugin. It writes the same records under
+the `opencode` agent: a user prompt marks the session active, each assistant message carries `tokens.cache.read` and
+`tokens.cache.write`, and `session.idle` ends the turn and records the cache. opencode has no SessionEnd equivalent, so
+a record goes away when the session is deleted or when the six-hour prune removes it. Anthropic-routed sessions get a
+5-minute TTL, everything else the OpenAI estimate; set `CACHEWATCH_OPENCODE_TTL` to `1h`, `5m` or `openai` to override.
 
 The app reads that directory locally every ten seconds and, every thirty seconds, runs `ssh <host>` for each
 configured remote host to read the same directory there. Your `~/.ssh/config` applies; with ControlMaster on, each poll
@@ -43,17 +49,19 @@ On a remote host, from this directory:
 
 ```sh
 fleet exec ampere 'mkdir -p ~/tmp/cw'
-fleet cp hooks/cachewatch-hook hooks/install.sh hooks/configure-codex.py ampere:~/tmp/cw/
+fleet cp hooks/cachewatch-hook hooks/cachewatch-opencode.js hooks/install.sh hooks/configure-codex.py ampere:~/tmp/cw/
 fleet exec ampere 'sh ~/tmp/cw/install.sh'
 ```
 
 The installer copies the hook to `~/.local/bin/cachewatch-hook` and registers it, idempotently, in
-`~/.claude/settings.json` and `$CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`) next to existing hooks.
+`~/.claude/settings.json` and `$CODEX_HOME/hooks.json` (default `~/.codex/hooks.json`) next to existing hooks. It also
+copies the opencode plugin to `~/.config/opencode/plugin/cachewatch.js`.
 It needs `sh`, `python3`, and Codex on PATH. The installer uses Codex's app-server API to enable the hooks feature
 and enable and trust only the three cachewatch hooks. Existing unrelated hooks and their settings are preserved.
 Registering `hooks.json` alone is insufficient when Codex has disabled a hook or has not trusted its definition.
 
-Hooks take effect for new agent sessions. Exit and resume existing Codex sessions after installation, including
+Hooks take effect for new agent sessions. Restart opencode after installation so it loads the plugin. Exit and resume
+existing Codex sessions after installation, including
 sessions inside herdr on each host. Restarting CacheMenuBar is unnecessary. A session appears on its next prompt;
 its cache countdown begins when the turn finishes. SessionEnd removes its record.
 
@@ -84,7 +92,8 @@ another turn:
 |---|---|
 | Claude Code, 1h TTL | 13, 28, 43, 58 |
 | Claude Code, 5m TTL | 1, 3 |
-| Codex or chat app on OpenAI (automatic cache, assumed 30 minutes) | 8, 18, 28 |
+| opencode on an Anthropic model | 1, 3 |
+| Codex, opencode elsewhere, or chat app on OpenAI (automatic cache, assumed 30 minutes) | 8, 18, 28 |
 
 A final notice fires when the cache has expired, with the estimated cost of resuming. Sessions that are mid-turn are not
 reminded about. Marks that came due while the app or a host was unreachable are skipped, not backfilled.
@@ -109,7 +118,8 @@ in place breaks it. Launch at login is a checkbox in Settings, or from the shell
 /Applications/CacheMenuBar.app/Contents/MacOS/CacheMenuBar --register-login    # --unregister-login to undo
 ```
 
-Allow notifications when macOS asks. **Settings…** holds the chat app URL (default `http://localhost:8787`), the remote host list (default `ampere`), the chime,
-notification and launch-at-login switches, and the assumed OpenAI cache lifetime. `build.sh` also writes
+Allow notifications when macOS asks. **Settings…** holds the chat app URL (default `http://localhost:8787`), the
+remote host list (default `ampere`), the chime, notification and launch-at-login switches, and the assumed OpenAI
+cache lifetime. `build.sh` also writes
 `CacheMenuBar.zip` with a universal binary for another Mac; unzip, right-click the app and choose **Open** once, because
 this personal build is not notarized.
