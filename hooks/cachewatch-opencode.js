@@ -4,9 +4,9 @@
 // ~/.local/state/cachewatch/opencode-<session>.json, the same records the Claude Code / Codex
 // hook writes and CacheMenuBar reads. Installed by hooks/install.sh into ~/.config/opencode/plugin/.
 //
-// opencode has no SessionEnd equivalent, so a record disappears when the session is deleted or when
-// the six-hour prune in cachewatch-hook removes it. Records are written with an atomic rename; they
-// are single-writer per session, so the plugin does not take the shared lock the shell hook uses.
+// opencode has no SessionEnd equivalent, so a record stays until the session is deleted or until the
+// six-hour prune in cachewatch-hook removes it. Records are written with an atomic rename. One writer
+// owns each session, so the plugin does not take the shared lock the shell hook uses.
 
 import fs from "node:fs";
 import os from "node:os";
@@ -56,7 +56,7 @@ function write(sessionID, patch) {
     fs.writeFileSync(tmp, JSON.stringify(state));
     fs.renameSync(tmp, recordPath(sessionID));
   } catch {
-    // A menu-bar reminder is never worth failing a turn over.
+    // Never fail a turn because a record could not be written.
   }
 }
 
