@@ -315,18 +315,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
     }
 
-    /// Local sessions: ask herdr to focus the agent's pane. Remote ones: nothing to jump to from here.
+    /// Jump to the session's herdr pane: focus the agent on the herdr server that hosts it (`--machine` for remote
+    /// hosts), then bring forward the terminal window running that herdr client. A remote host with no attached
+    /// client gets one in a new kitty tab when the local client runs in kitty.
     func focus(_ key: String) {
-        guard let s = all.first(where: { $0.key == key }), s.local else { return }
+        guard let s = all.first(where: { $0.key == key }) else { return }
         if let id = s.chatId { if let base = Settings.chatBase, let u = URL(string: base + "/#" + id) { NSWorkspace.shared.open(u) }; return }
-        let targets = [s.paneId, s.sessionId].compactMap { $0 }
-        func attempt(_ index: Int) {
-            guard index < targets.count else { return }
-            runProcess("/bin/sh", arguments: ["-lc", "exec herdr agent focus \"$1\"", "cache-menubar", targets[index]]) { result in
-                if result.status != 0 { attempt(index + 1) }
+        guard let pane = s.paneId else { return }
+        let remote = s.local ? nil : s.host
+        let script = remote == nil ? "exec herdr agent focus \"$1\"" : "exec herdr --machine \"$2\" agent focus \"$1\""
+        runProcess("/bin/sh", arguments: ["-lc", script, "cache-menubar", pane, s.host]) { _ in
+            // The pane may be gone (expired session); the terminal still comes forward.
+            runProcess("/bin/ps", arguments: ["-axwwE", "-o", "pid=,ppid=,command="]) { ps in
+                let table = String(decoding: ps.output, as: UTF8.self)
+                if let client = findHerdrClient(table, remote: remote) { self.raise(client); return }
+                guard let remote = remote, let home = findHerdrClient(table, remote: nil) else { return }
+                if let socket = home.kittySocket, let kitty = self.app(of: home)?.executableURL?.path {
+                    runProcess(kitty, arguments: ["@", "--to", socket, "launch", "--type=tab", "--tab-title", "herdr \(remote)",
+                                                  "/bin/zsh", "-lc", "exec herdr --remote \"$0\"", remote]) { _ in }
+                }
+                self.app(of: home).map(self.activate)
             }
         }
-        attempt(0)
+    }
+    /// The GUI app (terminal) that owns a herdr client: its nearest regular-app ancestor.
+    func app(of client: HerdrClient) -> NSRunningApplication? {
+        client.ancestors.lazy.compactMap { NSRunningApplication(processIdentifier: $0) }.first { $0.activationPolicy == .regular }
+    }
+    func activate(_ app: NSRunningApplication) {
+        if #available(macOS 14, *) { app.activate() } else { app.activate(options: .activateIgnoringOtherApps) }
+    }
+    func raise(_ client: HerdrClient) {
+        guard let app = app(of: client) else { return }
+        if let socket = client.kittySocket, let window = client.kittyWindow, let kitty = app.executableURL?.path {
+            runProcess(kitty, arguments: ["@", "--to", socket, "focus-window", "--match", "id:\(window)"]) { _ in }
+        }
+        activate(app)
     }
     @objc func focusAction(_ m: NSMenuItem) { if let k = m.representedObject as? String { focus(k) } }
     func changeWarm(_ id: String, body: [String: Any]) {
@@ -350,10 +374,11 @@ extension AppDelegate: NSMenuDelegate {
         let working = all.filter { $0.active }.sorted { $0.title < $1.title }
         let lapsed = all.filter { !$0.active && !$0.isLive(now) && $0.at != nil }.sorted { $0.at! > $1.at! }.prefix(6)
         func header(_ t: String) { let it = NSMenuItem(title: t, action: nil, keyEquivalent: ""); it.isEnabled = false; menu.addItem(it) }
+        func rows(_ list: some Sequence<SessionInfo>) { for s in list { sessionItems(s, now: now).forEach(menu.addItem) } }
         if l.isEmpty && working.isEmpty { header("No live prompt caches") }
-        if !l.isEmpty { header("Live caches"); for s in l { menu.addItem(sessionItem(s, now: now)) } }
-        if !working.isEmpty { if !l.isEmpty { menu.addItem(.separator()) }; header("Working now"); for s in working { menu.addItem(sessionItem(s, now: now)) } }
-        if !lapsed.isEmpty { menu.addItem(.separator()); header("Recently expired"); for s in lapsed { menu.addItem(sessionItem(s, now: now)) } }
+        if !l.isEmpty { header("Live caches"); rows(l) }
+        if !working.isEmpty { if !l.isEmpty { menu.addItem(.separator()) }; header("Working now"); rows(working) }
+        if !lapsed.isEmpty { menu.addItem(.separator()); header("Recently expired"); rows(lapsed) }
         for (h, e) in hostErrors.sorted(by: { $0.key < $1.key }) { menu.addItem(.separator()); header("\(h): \(e)") }
         menu.addItem(.separator())
         menu.addItem(withTitle: "Refresh", action: #selector(refreshAction), keyEquivalent: "r").target = self
@@ -370,11 +395,18 @@ extension AppDelegate: NSMenuDelegate {
         return "\(title)  ·  \(state)  ·  \(kilo(s.tokens))  ·  \(s.where_)"
     }
 
-    func sessionItem(_ s: SessionInfo, now: Date) -> NSMenuItem {
+    /// A row is two items: clicking the plain one jumps to the session (AppKit never fires the action of an item that
+    /// has a submenu), and holding ⌥ swaps in an alternate with the details submenu.
+    func sessionItems(_ s: SessionInfo, now: Date) -> [NSMenuItem] {
         let left = s.remaining(now)
-        let it = NSMenuItem(title: sessionTitle(s, now: now), action: #selector(focusAction), keyEquivalent: "")
-        it.target = self; it.representedObject = s.key
-        it.image = NSImage(systemSymbolName: s.warmOn ? "flame.fill" : s.active ? "circle.dotted" : left > 0 ? (left < 180 ? "exclamationmark.circle" : "checkmark.circle") : "clock.badge.xmark", accessibilityDescription: nil)
+        let image = NSImage(systemSymbolName: s.warmOn ? "flame.fill" : s.active ? "circle.dotted" : left > 0 ? (left < 180 ? "exclamationmark.circle" : "checkmark.circle") : "clock.badge.xmark", accessibilityDescription: nil)
+        let canJump = s.chatId != nil || s.paneId != nil
+        let it = NSMenuItem(title: sessionTitle(s, now: now), action: canJump ? #selector(focusAction) : nil, keyEquivalent: "")
+        it.target = self; it.representedObject = s.key; it.image = image
+        it.toolTip = canJump ? (s.isChat ? "Click to open in the browser" : "Click to open in herdr") + " · hold ⌥ for details" : "Not in a herdr pane · hold ⌥ for details"
+        let details = NSMenuItem(title: it.title, action: nil, keyEquivalent: "")
+        details.representedObject = s.key; details.image = image
+        details.isAlternate = true; details.keyEquivalentModifierMask = .option
         let sub = NSMenu()
         func info(_ t: String) { let i = NSMenuItem(title: t, action: nil, keyEquivalent: ""); i.isEnabled = false; sub.addItem(i) }
         info("\(s.agentLabel) · \(s.model.isEmpty ? "model unknown" : s.model) · \(s.ttlLabel)")
@@ -390,14 +422,14 @@ extension AppDelegate: NSMenuDelegate {
             let w = NSMenuItem(title: s.warmOn ? "Keep warm: on (\(s.warmPings) pings\(s.warmNext.map { ", next \(mmss($0.timeIntervalSince(now)))" } ?? ""))" : "Keep warm (server pings the cache)", action: #selector(warmAction), keyEquivalent: "")
             w.target = self; w.representedObject = id; w.state = s.warmOn ? .on : .off; sub.addItem(w)
             let p = NSMenuItem(title: "Ping now (1-token request)", action: #selector(pingAction), keyEquivalent: ""); p.target = self; p.representedObject = id; sub.addItem(p)
-        } else if s.local {
-            let f = NSMenuItem(title: "Focus in herdr", action: #selector(focusAction), keyEquivalent: ""); f.target = self; f.representedObject = s.key; sub.addItem(f)
+        } else if s.paneId != nil {
+            let f = NSMenuItem(title: s.local ? "Focus in herdr" : "Focus in herdr on \(s.host)", action: #selector(focusAction), keyEquivalent: ""); f.target = self; f.representedObject = s.key; sub.addItem(f)
         } else {
-            info("Remote session on \(s.host): attach with  herdr --remote \(s.host)")
+            info("Not running in a herdr pane")
         }
         if !s.cwd.isEmpty { let c = NSMenuItem(title: "Copy working directory", action: #selector(copyCwd(_:)), keyEquivalent: ""); c.target = self; c.representedObject = s.cwd; sub.addItem(c) }
-        it.submenu = sub
-        return it
+        details.submenu = sub
+        return [it, details]
     }
 }
 

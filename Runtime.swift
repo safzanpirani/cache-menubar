@@ -116,3 +116,40 @@ func runChatRequest(_ request: URLRequest, session: URLSession = .shared,
         DispatchQueue.main.async { done(result) }
     }.resume()
 }
+
+/// A running herdr TUI client: its own pid, its parent chain (up to launchd), and the kitty window it runs in.
+struct HerdrClient: Equatable {
+    let pid: Int32
+    let ancestors: [Int32]
+    let kittySocket: String?, kittyWindow: String?
+}
+
+/// Finds the herdr client for a host in `/bin/ps -axwwE -o pid=,ppid=,command=` output, where each command is
+/// followed by its environment. `remote` nil: the local client (`herdr` or `herdr --session NAME`). Otherwise the
+/// client attached with `herdr --remote <remote>`. Helper processes (`herdr client`, `herdr server`, API calls) never match.
+func findHerdrClient(_ table: String, remote: String?) -> HerdrClient? {
+    var parent: [Int32: Int32] = [:]
+    var found: (pid: Int32, env: [Substring])?
+    for line in table.split(separator: "\n") {
+        let fields = line.split(separator: " ", omittingEmptySubsequences: true)
+        guard fields.count >= 3, let pid = Int32(fields[0]), let ppid = Int32(fields[1]) else { continue }
+        parent[pid] = ppid
+        guard found == nil, fields[2].split(separator: "/").last == "herdr" else { continue }
+        let rest = fields.dropFirst(3)
+        let envStart = rest.firstIndex { $0.range(of: #"^[A-Za-z_][A-Za-z0-9_]*="#, options: .regularExpression) != nil } ?? rest.endIndex
+        let args = Array(rest[..<envStart])
+        let matches: Bool
+        if let remote = remote {
+            matches = args.firstIndex(of: "--remote").map { $0 + 1 < args.count && args[$0 + 1] == Substring(remote) } ?? false
+        } else {
+            matches = args.isEmpty || (args.count == 2 && args[0] == "--session")
+        }
+        if matches { found = (pid, Array(rest[envStart...])) }
+    }
+    guard let (pid, env) = found else { return nil }
+    var ancestors: [Int32] = []
+    var current = parent[pid]
+    while let p = current, p > 1, !ancestors.contains(p) { ancestors.append(p); current = parent[p] }
+    func value(_ key: String) -> String? { env.first { $0.hasPrefix(key + "=") }.map { String($0.dropFirst(key.count + 1)) } }
+    return HerdrClient(pid: pid, ancestors: ancestors, kittySocket: value("KITTY_LISTEN_ON"), kittyWindow: value("KITTY_WINDOW_ID"))
+}

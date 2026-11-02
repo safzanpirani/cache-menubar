@@ -41,8 +41,11 @@ Then add the host in **Settings…**, along with the chat app URL, the chimes an
 the other live sessions. When nothing is live, it shows how many sessions are working.
 
 **Menu**: live caches, then sessions working right now, then recently expired ones, each with time left, cached tokens
-and where it runs. Open a session for its model, TTL, working directory, last prompt and the cost of its next turn.
-Local sessions can be focused in herdr; remote ones name the host to attach to.
+and where it runs. Click a session to jump to it: the app focuses its herdr pane (`herdr --machine <host>` for a remote
+host) and brings forward the terminal window running that herdr client, picking the exact kitty window through kitty's
+remote control. A remote host with no `herdr --remote <host>` client open gets one in a new tab of the kitty that runs
+your local herdr. Notification clicks jump the same way. Hold ⌥ and open a session for its model, TTL, working
+directory, last prompt and the cost of its next turn. Sessions that did not start in a herdr pane show greyed out.
 
 ## Reminders
 

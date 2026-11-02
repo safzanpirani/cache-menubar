@@ -116,6 +116,27 @@ final class ChatProtocol: URLProtocol {
         if case .success(let data) = chat("204", method: "POST") { require(data.isEmpty, "empty successful action must be accepted") }
         else { require(false, "HTTP 204 must succeed") }
         if case .failure = chat("timeout") {} else { require(false, "transport failure must not succeed") }
-        print("PASS: process output, deadlines, poll ownership, reminder history, and HTTP failures")
+
+        // Shaped like `/bin/ps -axwwE -o pid=,ppid=,command=` with kitty hosting a local and a remote herdr client.
+        let table = """
+            1     0 /sbin/launchd
+          500     1 /Applications/kitty.app/Contents/MacOS/kitty TERM=xterm
+          510   500 login -pfl safzan /bin/zsh
+          511   510 -zsh KITTY_WINDOW_ID=4 KITTY_LISTEN_ON=unix:/tmp/kitty-500
+          512   511 herdr KITTY_WINDOW_ID=4 KITTY_LISTEN_ON=unix:/tmp/kitty-500 HOME=/Users/safzan
+          520   500 login -pfl safzan /bin/zsh
+          521   520 -zsh KITTY_WINDOW_ID=11
+          522   521 herdr --remote ampere KITTY_WINDOW_ID=11 KITTY_LISTEN_ON=unix:/tmp/kitty-500
+          523   522 /Users/safzan/.local/bin/herdr client KITTY_WINDOW_ID=11
+          530   1 /Users/safzan/.local/bin/herdr server HOME=/Users/safzan
+          531   600 /Users/safzan/.local/bin/herdr agent focus w1:p2 HOME=/Users/safzan
+        """
+        require(findHerdrClient(table, remote: nil) == HerdrClient(pid: 512, ancestors: [511, 510, 500], kittySocket: "unix:/tmp/kitty-500", kittyWindow: "4"),
+                "the local client is the bare `herdr`, with its kitty window and parent chain")
+        require(findHerdrClient(table, remote: "ampere")?.pid == 522 && findHerdrClient(table, remote: "ampere")?.kittyWindow == "11",
+                "a remote host maps to its `herdr --remote` client, not the `herdr client` helper")
+        require(findHerdrClient(table, remote: "server-pc") == nil, "a host with no attached client finds nothing")
+        require(findHerdrClient("  9 1 herdr --session work\n", remote: nil)?.pid == 9, "a named local session is a local client")
+        print("PASS: process output, deadlines, poll ownership, reminder history, HTTP failures, and herdr client lookup")
     }
 }
